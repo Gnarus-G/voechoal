@@ -1,28 +1,24 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
 
-  let name = "";
-  let greetMsg = "";
+  let is_recording = false;
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
-    greetMsg = await invoke("greet", { name });
+  async function toggle() {
+    if (is_recording) {
+      await invoke("record_pause");
+      is_recording = false;
+    } else {
+      await invoke("record_start");
+      is_recording = true;
+    }
   }
 </script>
 
 <div class="container">
-  <button type="submit">Greet</button>
+  <button on:click={toggle}>Toggle</button>
 </div>
 
 <style>
-  .logo.vite:hover {
-    filter: drop-shadow(0 0 2em #747bff);
-  }
-
-  .logo.svelte-kit:hover {
-    filter: drop-shadow(0 0 2em #ff3e00);
-  }
-
   :root {
     font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
     font-size: 16px;
@@ -45,36 +41,6 @@
     display: flex;
     flex-direction: column;
     justify-content: center;
-    text-align: center;
-  }
-
-  .logo {
-    height: 6em;
-    padding: 1.5em;
-    will-change: filter;
-    transition: 0.75s;
-  }
-
-  .logo.tauri:hover {
-    filter: drop-shadow(0 0 2em #24c8db);
-  }
-
-  .row {
-    display: flex;
-    justify-content: center;
-  }
-
-  a {
-    font-weight: 500;
-    color: #646cff;
-    text-decoration: inherit;
-  }
-
-  a:hover {
-    color: #535bf2;
-  }
-
-  h1 {
     text-align: center;
   }
 
@@ -109,18 +75,10 @@
     outline: none;
   }
 
-  #greet-input {
-    margin-right: 5px;
-  }
-
   @media (prefers-color-scheme: dark) {
     :root {
       color: #f6f6f6;
       background-color: #2f2f2f;
-    }
-
-    a:hover {
-      color: #24c8db;
     }
 
     input,
