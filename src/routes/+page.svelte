@@ -1,5 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
+  import { path } from "@tauri-apps/api";
 
   let is_recording = false;
 
@@ -12,9 +14,47 @@
       is_recording = true;
     }
   }
+
+  type AudioItem = {
+    id: string;
+    excerpt: string;
+    filepath: string;
+  };
+
+  type PollingState = {
+    is_transcribing: boolean;
+    audio_items: AudioItem[];
+  };
+
+  let state: PollingState = {
+    is_transcribing: false,
+    audio_items: [],
+  };
+
+  onMount(() => {
+    setInterval(async () => {
+      state = await invoke("poll_recordings");
+    }, 1000);
+  });
 </script>
 
 <div class="container">
+  {#each state.audio_items as item}
+    <article>
+      <h3>{item.excerpt}</h3>
+      <p>{item.id}</p>
+      {#await path.resolve(item.filepath) then path}
+        <p>{path}</p>
+      {/await}
+
+      <audio controls>
+        <source type="audio/wav" src={`file://${item.filepath}`} />
+        <!-- <a href={`file://${item.filepath}`} download="foo.wav" -->
+        <!--   >Download WAV audio</a -->
+        <!-- >. -->
+      </audio>
+    </article>
+  {/each}
   <button on:click={toggle}>Toggle</button>
 </div>
 

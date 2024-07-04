@@ -156,7 +156,11 @@ mod save {
 }
 
 mod stt {
+    use std::sync::atomic::AtomicBool;
+
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+    pub static IS_TRANSCRIBING: AtomicBool = AtomicBool::new(false);
 
     pub struct Transcribe {
         ctx: WhisperContext,
@@ -172,6 +176,8 @@ mod stt {
         }
 
         pub fn transcribe(&self, audio_data: &[f32], prompt: &str) -> String {
+            IS_TRANSCRIBING.store(true, std::sync::atomic::Ordering::Relaxed);
+
             let ctx = &self.ctx;
 
             let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -206,6 +212,8 @@ mod stt {
                 text.push_str(&segment);
             }
 
+            IS_TRANSCRIBING.store(false, std::sync::atomic::Ordering::Relaxed);
+
             text
         }
     }
@@ -217,8 +225,8 @@ mod stt {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct AudioItem {
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AudioItem {
     pub id: String,
     pub excerpt: String,
     pub filepath: PathBuf,
@@ -268,6 +276,30 @@ impl AudioItem {
             .context("failed to save new audio item in data file")?;
 
         Ok(())
+    }
+}
+
+pub mod polling {
+    use super::AudioItem;
+
+    #[derive(serde::Serialize, Debug)]
+    pub struct RecordingsPoll {
+        is_transcribing: bool,
+        audio_items: Vec<AudioItem>,
+    }
+
+    impl RecordingsPoll {
+        pub fn poll() -> anyhow::Result<Self> {
+            let items = AudioItem::load_all()?;
+
+            let is_transcribing =
+                super::stt::IS_TRANSCRIBING.load(std::sync::atomic::Ordering::Relaxed);
+
+            Ok(Self {
+                audio_items: items,
+                is_transcribing,
+            })
+        }
     }
 }
 
