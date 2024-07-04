@@ -19,4 +19,7 @@ cpal = "0.15.3"
 thiserror = "1.0.61"
 hound = "3.5.1"
 cuid2 = "0.1.2"
-
+whisper-rs = { git = "https://github.com/tazz4843/whisper-rs.git", features = [
+  "hipblas",
+] }
+anyhow = "1.0.86"
