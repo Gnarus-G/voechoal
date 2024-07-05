@@ -3,9 +3,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::background::procedure::BackgroundProcedure;
+
 pub struct AudioCtrls {
     pub player: player::StreamControl,
-    pub ecouter: ecouter::StreamControl,
+    pub ecouter: BackgroundProcedure<Vec<f32>, ecouter::StreamControlCommand>,
     pub db: Arc<Mutex<database::FSDatabase>>,
 }
 
@@ -38,7 +40,7 @@ pub mod player {
 
     use rodio::Source;
 
-    enum StreamControlCommand {
+    pub enum StreamControlCommand {
         /// play audio item by id
         Play(String),
         Pause(String),
@@ -186,39 +188,23 @@ pub mod player {
 }
 
 pub mod ecouter {
-    use std::sync::{
-        mpsc::{channel, Sender},
-        Arc, Mutex,
-    };
+    use std::sync::Arc;
 
     use cpal::traits::StreamTrait;
 
-    use crate::audio::{self, audio_stream_err_fn, database::wav_spec_from};
+    use crate::{
+        audio::{self, audio_stream_err_fn, database::wav_spec_from},
+        background::procedure::BackgroundProcedure,
+    };
 
-    enum StreamControlCommand {
+    pub enum StreamControlCommand {
         Play,
         Pause,
     }
 
-    pub struct StreamControl {
-        tx: Sender<StreamControlCommand>,
-    }
-
-    impl StreamControl {
-        pub fn start(&self) {
-            self.tx
-                .send(StreamControlCommand::Play)
-                .expect("failed to send Control::Play through channel");
-        }
-
-        pub fn pause(&self) {
-            self.tx
-                .send(StreamControlCommand::Pause)
-                .expect("failed to send Control::Pause through channel");
-        }
-    }
-
-    pub fn setup(host: &cpal::Host) -> anyhow::Result<StreamControl> {
+    pub fn setup(
+        host: &cpal::Host,
+    ) -> anyhow::Result<BackgroundProcedure<Vec<f32>, StreamControlCommand>> {
         use cpal::traits::{DeviceTrait, HostTrait};
 
         let mic = host
@@ -232,67 +218,75 @@ pub mod ecouter {
 
         eprintln!("[debug] input config: {:?}", config);
 
-        let (send_ctrl, receiver_ctrl) = channel::<StreamControlCommand>();
+        let job_handle =
+            BackgroundProcedure::<Vec<f32>, StreamControlCommand>::setup(vec![], move |arg| {
+                let audio_buffer = arg.state;
+                let audio_buffer_ref = Arc::clone(&audio_buffer);
 
-        let _handle = std::thread::spawn(move || {
-            let audio_buffer = Arc::new(Mutex::new(vec![] as Vec<f32>));
-            let audio_buffer_ref = Arc::clone(&audio_buffer);
+                let stream = mic
+                    .build_input_stream(
+                        &config,
+                        move |data: &[f32], _| {
+                            eprintln!("[info]: data len {:?}", &data.len());
+                            audio_buffer_ref
+                                .lock()
+                                .expect("failed to lock on audio_buffer")
+                                .extend(data);
+                        },
+                        audio_stream_err_fn,
+                        None,
+                    )
+                    .expect("failed to build_input_stream");
 
-            let stream = mic
-                .build_input_stream(
-                    &config,
-                    move |data: &[f32], _| {
-                        eprintln!("[info]: {:?}", &data[0..2]);
-                        audio_buffer_ref
-                            .lock()
-                            .expect("failed to lock on audio_buffer")
-                            .extend(data);
-                    },
-                    audio_stream_err_fn,
-                    None,
-                )
-                .expect("failed to build_input_stream");
-
-            stream.pause().expect("failed to pause the input stream");
-
-            let on_pause = |stream: &cpal::Stream, config: &cpal::StreamConfig| {
                 stream.pause().expect("failed to pause the input stream");
 
-                let mut db = audio::database::FSDatabase::new();
+                let on_pause = |stream: &cpal::Stream, config: &cpal::StreamConfig| {
+                    stream.pause().expect("failed to pause the input stream");
+                    eprintln!("[info] done listening");
 
-                let audio_item = audio::AudioItem::new(
-                    &audio_buffer.lock().expect("failed to lock on audio_buffer"),
-                );
+                    let mut db = audio::database::FSDatabase::new();
 
-                {
-                    let buffer = audio_buffer.lock().expect("failed to lock on audio_buffer");
-                    db.write_to_wav(&buffer, &audio_item.id, wav_spec_from(config));
-                }
+                    let audio_item = audio::AudioItem::new(
+                        &audio_buffer.lock().expect("failed to lock on audio_buffer"),
+                    );
 
-                db.save_audio_item(audio_item)
-                    .expect("failed to to save new audio item");
-
-                audio_buffer
-                    .lock()
-                    .expect("failed to lock on audio_buffer")
-                    .clear();
-            };
-
-            loop {
-                let ctrl = receiver_ctrl
-                    .recv()
-                    .expect("failed to receive from control channel");
-
-                match ctrl {
-                    StreamControlCommand::Play => {
-                        stream.play().expect("failed to play the input stream");
+                    eprintln!("[info] write wav file for new audio item");
+                    {
+                        db.write_to_wav(
+                            &audio_buffer.lock().expect("failed to lock on audio_buffer"),
+                            &audio_item.id,
+                            wav_spec_from(config),
+                        );
                     }
-                    StreamControlCommand::Pause => on_pause(&stream, &config),
-                };
-            }
-        });
 
-        Ok(StreamControl { tx: send_ctrl })
+                    eprintln!("[info] saving audio item");
+                    db.save_audio_item(audio_item)
+                        .expect("failed to to save new audio item");
+
+                    audio_buffer
+                        .lock()
+                        .expect("failed to lock on audio_buffer")
+                        .clear();
+                    eprintln!("[trace] cleared audio_buffer");
+                };
+
+                loop {
+                    let ctrl = arg
+                        .rx
+                        .recv()
+                        .expect("failed to receive from control channel");
+
+                    match ctrl {
+                        StreamControlCommand::Play => {
+                            eprintln!("[info] listening...");
+                            stream.play().expect("failed to play the input stream");
+                        }
+                        StreamControlCommand::Pause => on_pause(&stream, &config),
+                    };
+                }
+            });
+
+        Ok(job_handle)
     }
 }
 

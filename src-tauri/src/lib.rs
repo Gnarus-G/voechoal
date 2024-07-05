@@ -6,12 +6,16 @@ use audio::AudioCtrls;
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]
 fn record_start(state: tauri::State<'_, AudioCtrls>) {
-    state.ecouter.start();
+    state
+        .ecouter
+        .trigger(audio::ecouter::StreamControlCommand::Play);
 }
 
 #[tauri::command]
 fn record_pause(state: tauri::State<'_, AudioCtrls>) {
-    state.ecouter.pause();
+    state
+        .ecouter
+        .trigger(audio::ecouter::StreamControlCommand::Pause);
 }
 
 #[tauri::command]

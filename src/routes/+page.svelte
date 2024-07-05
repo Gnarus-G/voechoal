@@ -25,7 +25,7 @@
     setInterval(async () => {
       state = await invoke("poll_recordings");
       /* console.log("items", state.audio_items); */
-    }, 100);
+    }, 1000);
   });
 </script>
 
