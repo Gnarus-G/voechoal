@@ -17,7 +17,12 @@
 
 <article class="flex justify-between items-center bg-slate-800 p-3 rounded-md">
   <div>
-    <h3 class="text-lg">{item.excerpt}</h3>
+    {#if item.excerpt}
+      <h3 class="text-lg line-clamp-2">{item.excerpt}</h3>
+    {:else}
+      <h3 class="text-lg">...</h3>
+    {/if}
+
     <p class="text-slate-400 text-xs">{item.id}</p>
   </div>
   <button

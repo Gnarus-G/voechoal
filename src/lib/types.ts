@@ -1,6 +1,6 @@
 export type AudioItem = {
   id: string;
-  excerpt: string;
+  excerpt: string | null;
   filepath: string;
   is_playing: boolean;
 };
