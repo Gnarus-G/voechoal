@@ -24,7 +24,8 @@
   onMount(() => {
     setInterval(async () => {
       state = await invoke("poll_recordings");
-    }, 1000);
+      /* console.log("items", state.audio_items); */
+    }, 100);
   });
 </script>
 

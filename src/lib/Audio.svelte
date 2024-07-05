@@ -1,11 +1,17 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import type { AudioItem } from "./types";
 
   export let item: AudioItem;
 
-  let is_playing = false;
+  $: is_playing = item.is_playing;
+
   async function play() {
-    is_playing = !is_playing;
+    if (is_playing) {
+      await invoke("player_pause", { id: item.id });
+    } else {
+      await invoke("player_start", { id: item.id });
+    }
   }
 </script>
 
