@@ -6,7 +6,7 @@ use std::{
 use crate::background::procedure::BackgroundProcedure;
 
 pub struct AudioCtrls {
-    pub player: player::StreamControl,
+    pub player: BackgroundProcedure<Option<String>, player::StreamControlCommand>,
     pub ecouter: BackgroundProcedure<Vec<f32>, ecouter::StreamControlCommand>,
     pub db: Arc<Mutex<database::FSDatabase>>,
 }
@@ -14,7 +14,7 @@ pub struct AudioCtrls {
 pub fn setup() -> anyhow::Result<AudioCtrls> {
     let db = Arc::new(Mutex::new(database::FSDatabase::new()));
     let host = cpal::default_host();
-    let ectrl = ecouter::setup(&host)?;
+    let ectrl = ecouter::setup(&host, db.clone())?;
     let pctrl = player::setup(&host, db.clone())?;
 
     return Ok(AudioCtrls {
@@ -32,13 +32,10 @@ pub mod player {
             mpsc::{channel, Sender},
             Arc, Mutex,
         },
-        time::Duration,
     };
 
     use anyhow::{anyhow, Context};
     use cpal::traits::{DeviceTrait, HostTrait};
-
-    use rodio::Source;
 
     pub enum StreamControlCommand {
         /// play audio item by id
@@ -64,11 +61,14 @@ pub mod player {
         }
     }
 
-    use crate::audio::database::UpdateParams;
+    use crate::{audio::database::UpdateParams, background::procedure::BackgroundProcedure};
 
     use super::{app_dir, database::FSDatabase};
 
-    pub fn setup(host: &cpal::Host, db: Arc<Mutex<FSDatabase>>) -> anyhow::Result<StreamControl> {
+    pub fn setup(
+        host: &cpal::Host,
+        db: Arc<Mutex<FSDatabase>>,
+    ) -> anyhow::Result<BackgroundProcedure<Option<String>, StreamControlCommand>> {
         let speakers = host
             .default_output_device()
             .expect("no input device available");
@@ -80,115 +80,101 @@ pub mod player {
         let config: cpal::StreamConfig = supported_config.into();
         eprintln!("[debug] output config: {:?}", config);
 
-        let (send_ctrl, receiver_ctrl) = channel::<StreamControlCommand>();
-
         // Thread that handles play/pause commands
-        let _handle = std::thread::spawn(move || {
-            let mut current_audio_item_id: Option<String> = None;
+        let job_handle =
+            BackgroundProcedure::<Option<String>, StreamControlCommand>::setup(None, move |arg| {
+                let mut current_audio_item_id: Option<String> = None;
 
-            let (_stream, handle) = rodio::OutputStream::try_default().unwrap();
-            let sink = Arc::new(rodio::Sink::try_new(&handle).unwrap());
-            let sink_ = Arc::clone(&sink);
+                let (_stream, handle) = rodio::OutputStream::try_default().unwrap();
+                let sink = Arc::new(rodio::Sink::try_new(&handle).unwrap());
+                let sink_ = Arc::clone(&sink);
 
-            let (tx_id, rx_id) = channel::<String>();
+                let (tx_id, rx_id) = channel::<String>();
 
-            let audio_duration = Arc::new(Mutex::new(Duration::ZERO));
-            let audio_duration_ref = Arc::clone(&audio_duration);
-            let _ = std::thread::spawn(move || loop {
-                let id = rx_id.recv().unwrap();
-                let wavfilepath = app_dir().join(&id).with_extension("wav");
+                let db_for_closure = Arc::clone(&db);
+                let _ = std::thread::spawn(move || loop {
+                    let id = rx_id.recv().unwrap();
+                    let wavfilepath = app_dir().join(&id).with_extension("wav");
 
-                let file = fs::File::open(&wavfilepath)
-                    .context(anyhow!("failed to open file: {:?}", wavfilepath))
-                    .expect("failed to open wav file for reading");
+                    let file = fs::File::open(&wavfilepath)
+                        .context(anyhow!("failed to open file: {:?}", wavfilepath))
+                        .expect("failed to open wav file for reading");
 
-                sink_.stop();
+                    eprintln!("[info] audio item {} is playing", id);
 
-                eprintln!("[info] audio item {} is playing", id);
+                    let dec = rodio::Decoder::new(BufReader::new(file)).unwrap();
+                    sink_.append(dec);
 
-                // let file = std::fs::File::open("/home/gnarus/d/voechol/src-tauri/target/debug/build/whisper-rs-sys-44ecd8d3e9c7f53a/out/whisper.cpp/samples/jfk.mp3").unwrap();
-                let dec = rodio::Decoder::new(BufReader::new(file)).unwrap();
+                    sink_.play();
+                    sink_.sleep_until_end();
 
-                if let Some(dur) = dec.total_duration() {
-                    *audio_duration_ref.lock().unwrap() = dur;
-                    eprintln!("[trace] audio duration: {:?}", dur);
-                }
+                    eprintln!("[info] audio item {} is done playing", id);
 
-                sink_.append(dec);
+                    db_for_closure
+                        .lock()
+                        .unwrap()
+                        .update_audio_items(UpdateParams {
+                            id: &id,
+                            is_playing: Some(false),
+                            filepath: None,
+                        })
+                        .expect("failed to mark audio item as paused");
+                });
 
-                sink_.play();
-            });
+                eprintln!("[info] player is ready");
+                loop {
+                    let ctrl = arg.rx.recv();
 
-            eprintln!("[info] player is ready");
-            loop {
-                let ctrl = receiver_ctrl.try_recv();
+                    match ctrl {
+                        Ok(StreamControlCommand::Play(id)) => {
+                            eprintln!("[info] requested to play item: {}", id);
 
-                match ctrl {
-                    Ok(StreamControlCommand::Play(id)) => {
-                        eprintln!("[info] requested to play item: {}", id);
+                            db.lock()
+                                .unwrap()
+                                .update_audio_items(UpdateParams {
+                                    id: &id,
+                                    is_playing: Some(true),
+                                    filepath: None,
+                                })
+                                .expect("failed to mark audio item as playing");
 
-                        db.lock()
-                            .unwrap()
-                            .update_audio_items(UpdateParams {
-                                id: &id,
-                                is_playing: Some(true),
-                                filepath: None,
-                            })
-                            .expect("failed to mark audio item as playing");
+                            if current_audio_item_id.as_ref() != Some(&id) {
+                                current_audio_item_id = Some(id.clone());
+                                sink.stop();
 
-                        if current_audio_item_id.as_ref() != Some(&id) {
-                            current_audio_item_id = Some(id.clone());
-                            tx_id.send(id).expect("failed to send audio item id");
-                        }
-
-                        sink.play();
-                    }
-                    Ok(StreamControlCommand::Pause(id)) => {
-                        eprintln!("[info] requested to pause item: {}", id);
-
-                        sink.pause();
-
-                        db.lock()
-                            .unwrap()
-                            .update_audio_items(UpdateParams {
-                                id: &id,
-                                is_playing: Some(false),
-                                filepath: None,
-                            })
-                            .expect("failed to mark audio item as paused");
-                    }
-                    Err(err) => match err {
-                        std::sync::mpsc::TryRecvError::Empty => {
-                            if let Some(id) = current_audio_item_id.as_ref() {
-                                let dur = *audio_duration.lock().unwrap();
-                                // eprintln!("[trace] audio pos {:?} vs dur {:?}", sink.get_pos(), dur);
-                                if dur.as_secs() != 0 && sink.get_pos().as_secs() >= dur.as_secs() {
-                                    // eprintln!("[info] audio item {} is done playing", id);
-                                    db.lock()
-                                        .unwrap()
-                                        .update_audio_items(UpdateParams {
-                                            id,
-                                            is_playing: Some(false),
-                                            filepath: None,
-                                        })
-                                        .expect("failed to mark audio item as playing");
-                                }
+                                tx_id.send(id).expect("failed to send audio item id");
                             }
+
+                            sink.play();
                         }
-                        std::sync::mpsc::TryRecvError::Disconnected => {
+                        Ok(StreamControlCommand::Pause(id)) => {
+                            eprintln!("[info] requested to pause item: {}", id);
+
+                            sink.pause();
+
+                            db.lock()
+                                .unwrap()
+                                .update_audio_items(UpdateParams {
+                                    id: &id,
+                                    is_playing: Some(false),
+                                    filepath: None,
+                                })
+                                .expect("failed to mark audio item as paused");
+                        }
+                        Err(err) => {
+                            eprintln!("[error] recieve err on channel: {}", err);
                             return;
                         }
-                    },
-                };
-            }
-        });
+                    };
+                }
+            });
 
-        Ok(StreamControl { tx: send_ctrl })
+        Ok(job_handle)
     }
 }
 
 pub mod ecouter {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use cpal::traits::StreamTrait;
 
@@ -197,6 +183,8 @@ pub mod ecouter {
         background::procedure::BackgroundProcedure,
     };
 
+    use super::database::FSDatabase;
+
     pub enum StreamControlCommand {
         Play,
         Pause,
@@ -204,6 +192,7 @@ pub mod ecouter {
 
     pub fn setup(
         host: &cpal::Host,
+        db: Arc<Mutex<FSDatabase>>,
     ) -> anyhow::Result<BackgroundProcedure<Vec<f32>, StreamControlCommand>> {
         use cpal::traits::{DeviceTrait, HostTrait};
 
@@ -244,15 +233,13 @@ pub mod ecouter {
                     stream.pause().expect("failed to pause the input stream");
                     eprintln!("[info] done listening");
 
-                    let mut db = audio::database::FSDatabase::new();
-
                     let audio_item = audio::AudioItem::new(
                         &audio_buffer.lock().expect("failed to lock on audio_buffer"),
                     );
 
                     eprintln!("[info] write wav file for new audio item");
                     {
-                        db.write_to_wav(
+                        db.lock().unwrap().write_to_wav(
                             &audio_buffer.lock().expect("failed to lock on audio_buffer"),
                             &audio_item.id,
                             wav_spec_from(config),
@@ -260,7 +247,9 @@ pub mod ecouter {
                     }
 
                     eprintln!("[info] saving audio item");
-                    db.save_audio_item(audio_item)
+                    db.lock()
+                        .unwrap()
+                        .save_audio_item(audio_item)
                         .expect("failed to to save new audio item");
 
                     audio_buffer
@@ -305,6 +294,7 @@ mod database {
     pub struct FSDatabase {
         wav_dir: PathBuf,
         datafile: PathBuf,
+        items: Vec<AudioItem>,
     }
 
     pub struct UpdateParams<'i> {
@@ -327,11 +317,12 @@ mod database {
             Self {
                 wav_dir: app_dir(),
                 datafile: audio_items_data_file(),
+                items: Self::load_all().unwrap(),
             }
         }
 
         pub fn items(&self) -> Vec<AudioItem> {
-            Self::load_all().unwrap()
+            self.items.clone()
         }
 
         pub fn write_to_wav(&mut self, buffer: &[f32], id: &str, spec: hound::WavSpec) {
@@ -361,8 +352,7 @@ mod database {
         }
 
         pub fn save_audio_item(&mut self, item: AudioItem) -> anyhow::Result<()> {
-            let mut items = self.items();
-            items.push(item);
+            self.items.push(item);
 
             self.save_all()
                 .context("failed to save new audio item in data file")?;
@@ -380,7 +370,7 @@ mod database {
         }
 
         pub fn update_audio_items(&mut self, params: UpdateParams) -> anyhow::Result<()> {
-            for item in self.items().iter_mut() {
+            for item in self.items.iter_mut() {
                 if item.id == params.id {
                     item.is_playing = params.is_playing.unwrap_or(item.is_playing);
                     item.filepath = params

@@ -24,18 +24,22 @@ fn poll_recordings(
 ) -> Result<audio::polling::RecordingsPoll, String> {
     let result = audio::polling::RecordingsPoll::poll(&state.db.lock().unwrap())
         .map_err(|err| err.to_string())?;
-    // eprintln!("[info] serving polled: {:?}", result);
+    eprintln!("[info] serving polled: {:?}", result);
     Ok(result)
 }
 
 #[tauri::command]
 fn player_start(state: tauri::State<'_, AudioCtrls>, id: String) {
-    state.player.start(id);
+    state
+        .player
+        .trigger(audio::player::StreamControlCommand::Play(id));
 }
 
 #[tauri::command]
 fn player_pause(state: tauri::State<'_, AudioCtrls>, id: String) {
-    state.player.pause(id);
+    state
+        .player
+        .trigger(audio::player::StreamControlCommand::Pause(id));
 }
 
 pub fn run() {
