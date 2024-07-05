@@ -3,8 +3,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-mod jobs;
-
 pub struct AudioCtrls {
     pub player: player::StreamControl,
     pub ecouter: ecouter::StreamControl,
