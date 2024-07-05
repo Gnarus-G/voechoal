@@ -5,21 +5,30 @@ use std::{
 
 use crate::background::procedure::BackgroundProcedure;
 
+pub enum StreamControlCommand {
+    /// play audio item by id
+    Play(String),
+    Pause(Option<String>),
+}
+
 pub struct AudioCtrls {
-    pub player: BackgroundProcedure<Option<String>, player::StreamControlCommand>,
-    pub ecouter: BackgroundProcedure<Vec<f32>, ecouter::StreamControlCommand>,
+    pub player: BackgroundProcedure<Option<String>, StreamControlCommand>,
+    pub ecouter: BackgroundProcedure<Vec<f32>, StreamControlCommand>,
+    pub sttlistener: BackgroundProcedure<(), StreamControlCommand>,
     pub db: Arc<Mutex<database::FSDatabase>>,
 }
 
 pub fn setup() -> anyhow::Result<AudioCtrls> {
     let db = Arc::new(Mutex::new(database::FSDatabase::new()));
     let host = cpal::default_host();
+    let sttlistener = stt::listener::setup(&host, db.clone());
     let ectrl = ecouter::setup(&host, db.clone())?;
     let pctrl = player::setup(&host, db.clone())?;
 
     return Ok(AudioCtrls {
         player: pctrl,
         ecouter: ectrl,
+        sttlistener,
         db,
     });
 }
@@ -28,42 +37,15 @@ pub mod player {
     use std::{
         fs,
         io::BufReader,
-        sync::{
-            mpsc::{channel, Sender},
-            Arc, Mutex,
-        },
+        sync::{mpsc::channel, Arc, Mutex},
     };
 
     use anyhow::{anyhow, Context};
     use cpal::traits::{DeviceTrait, HostTrait};
 
-    pub enum StreamControlCommand {
-        /// play audio item by id
-        Play(String),
-        Pause(String),
-    }
-
-    pub struct StreamControl {
-        tx: Sender<StreamControlCommand>,
-    }
-
-    impl StreamControl {
-        pub fn start(&self, id: String) {
-            self.tx
-                .send(StreamControlCommand::Play(id))
-                .expect("failed to send Control::Play through channel");
-        }
-
-        pub fn pause(&self, id: String) {
-            self.tx
-                .send(StreamControlCommand::Pause(id))
-                .expect("failed to send Control::Pause through channel");
-        }
-    }
-
     use crate::{audio::database::UpdateParams, background::procedure::BackgroundProcedure};
 
-    use super::{app_dir, database::FSDatabase};
+    use super::{app_dir, database::FSDatabase, StreamControlCommand};
 
     pub fn setup(
         host: &cpal::Host,
@@ -117,6 +99,7 @@ pub mod player {
                             id: &id,
                             is_playing: Some(false),
                             filepath: None,
+                            excerpt: None,
                         })
                         .expect("failed to mark audio item as paused");
                 });
@@ -135,6 +118,7 @@ pub mod player {
                                     id: &id,
                                     is_playing: Some(true),
                                     filepath: None,
+                                    excerpt: None,
                                 })
                                 .expect("failed to mark audio item as playing");
 
@@ -148,18 +132,21 @@ pub mod player {
                             sink.play();
                         }
                         Ok(StreamControlCommand::Pause(id)) => {
-                            eprintln!("[info] requested to pause item: {}", id);
+                            eprintln!("[info] requested to pause item: {:?}", id);
 
                             sink.pause();
 
-                            db.lock()
-                                .unwrap()
-                                .update_audio_items(UpdateParams {
-                                    id: &id,
-                                    is_playing: Some(false),
-                                    filepath: None,
-                                })
-                                .expect("failed to mark audio item as paused");
+                            if let Some(id) = id {
+                                db.lock()
+                                    .unwrap()
+                                    .update_audio_items(UpdateParams {
+                                        id: &id,
+                                        is_playing: Some(false),
+                                        filepath: None,
+                                        excerpt: None,
+                                    })
+                                    .expect("failed to mark audio item as paused");
+                            }
                         }
                         Err(err) => {
                             eprintln!("[error] recieve err on channel: {}", err);
@@ -183,12 +170,7 @@ pub mod ecouter {
         background::procedure::BackgroundProcedure,
     };
 
-    use super::database::FSDatabase;
-
-    pub enum StreamControlCommand {
-        Play,
-        Pause,
-    }
+    use super::{database::FSDatabase, StreamControlCommand};
 
     pub fn setup(
         host: &cpal::Host,
@@ -216,7 +198,7 @@ pub mod ecouter {
                     .build_input_stream(
                         &config,
                         move |data: &[f32], _| {
-                            eprintln!("[info]: data len {:?}", &data.len());
+                            // eprintln!("[info]: data len {:?}", &data.len());
                             audio_buffer_ref
                                 .lock()
                                 .expect("failed to lock on audio_buffer")
@@ -229,19 +211,19 @@ pub mod ecouter {
 
                 stream.pause().expect("failed to pause the input stream");
 
-                let on_pause = |stream: &cpal::Stream, config: &cpal::StreamConfig| {
+                let pause = |stream: &cpal::Stream,
+                             config: &cpal::StreamConfig,
+                             new_audio_item_id: String| {
                     stream.pause().expect("failed to pause the input stream");
                     eprintln!("[info] done listening");
 
-                    let audio_item = audio::AudioItem::new(
-                        &audio_buffer.lock().expect("failed to lock on audio_buffer"),
-                    );
+                    let audio_item = audio::AudioItem::new(new_audio_item_id);
 
                     eprintln!("[info] write wav file for new audio item");
                     {
                         db.lock().unwrap().write_to_wav(
+                            &audio_item,
                             &audio_buffer.lock().expect("failed to lock on audio_buffer"),
-                            &audio_item.id,
                             wav_spec_from(config),
                         );
                     }
@@ -259,6 +241,7 @@ pub mod ecouter {
                     eprintln!("[trace] cleared audio_buffer");
                 };
 
+                let mut current_new_audio_item_id = None;
                 loop {
                     let ctrl = arg
                         .rx
@@ -266,11 +249,16 @@ pub mod ecouter {
                         .expect("failed to receive from control channel");
 
                     match ctrl {
-                        StreamControlCommand::Play => {
+                        StreamControlCommand::Play(id) => {
                             eprintln!("[info] listening...");
+                            current_new_audio_item_id = Some(id);
                             stream.play().expect("failed to play the input stream");
                         }
-                        StreamControlCommand::Pause => on_pause(&stream, &config),
+                        StreamControlCommand::Pause(_) => {
+                            if let Some(id) = current_new_audio_item_id.clone() {
+                                pause(&stream, &config, id);
+                            }
+                        }
                     };
                 }
             });
@@ -301,6 +289,7 @@ mod database {
         pub id: &'i str,
         pub filepath: Option<&'i Path>,
         pub is_playing: Option<bool>,
+        pub excerpt: Option<String>,
     }
 
     pub fn wav_spec_from(config: &cpal::StreamConfig) -> hound::WavSpec {
@@ -325,9 +314,9 @@ mod database {
             self.items.clone()
         }
 
-        pub fn write_to_wav(&mut self, buffer: &[f32], id: &str, spec: hound::WavSpec) {
+        pub fn write_to_wav(&mut self, item: &AudioItem, buffer: &[f32], spec: hound::WavSpec) {
             eprintln!("[info] writing wav with specs: {:?}", spec);
-            let wav_filepath = self.wav_dir.join(id).with_extension("wav");
+            let wav_filepath = self.wav_dir.join(&item.id).with_extension("wav");
             let mut writer =
                 hound::WavWriter::create(wav_filepath, spec).expect("failed to create wav writer");
 
@@ -377,6 +366,10 @@ mod database {
                         .filepath
                         .map(|p| p.to_path_buf())
                         .unwrap_or(item.filepath.clone());
+                    if let Some(e) = params.excerpt {
+                        item.excerpt = Some(e);
+                    }
+
                     self.save_all()?;
                     break;
                 }
@@ -450,39 +443,154 @@ mod stt {
         }
     }
 
-    /// Assuming mic input stream gave us the same sample for each of 2 channels.
-    /// So we can discard one of the channels safely.
-    pub fn stereo_to_mono(buffer: &[f32]) -> Vec<f32> {
-        buffer.chunks(2).map(|c| c[0]).collect()
+    pub mod listener {
+        use std::{
+            ops::Deref,
+            sync::{Arc, Mutex},
+        };
+
+        use cpal::traits::{HostTrait, StreamTrait};
+        use rodio::DeviceTrait;
+
+        use crate::{
+            audio::{audio_stream_err_fn, database::FSDatabase, StreamControlCommand},
+            background::procedure::BackgroundProcedure,
+            sharedref::SharedMutRef,
+        };
+
+        const WHISPER_SAMPLE_RATE: u32 = 16000;
+        const MAX_AUDIO_LEN_SECONDS: u32 = 5;
+        const WHISPER_CHANNEL_COUNT: u16 = 1; // mono because whisper wants it
+
+        pub fn setup(
+            host: &cpal::Host,
+            db: Arc<Mutex<FSDatabase>>,
+        ) -> BackgroundProcedure<(), StreamControlCommand> {
+            let mic = host
+                .default_input_device()
+                .expect("failed to get default input device");
+
+            let job = BackgroundProcedure::<_, StreamControlCommand>::setup((), move |arg| {
+                let buffer_size = WHISPER_SAMPLE_RATE * MAX_AUDIO_LEN_SECONDS;
+                let config: cpal::StreamConfig = cpal::StreamConfig {
+                    channels: WHISPER_CHANNEL_COUNT,
+                    sample_rate: cpal::SampleRate(WHISPER_SAMPLE_RATE),
+                    buffer_size: cpal::BufferSize::Fixed(buffer_size),
+                };
+
+                struct Buffer {
+                    cap: u32,
+                    inner: Vec<f32>,
+                }
+
+                impl Buffer {
+                    fn new(cap: u32) -> Self {
+                        Self {
+                            inner: Vec::with_capacity(cap as usize),
+                            cap,
+                        }
+                    }
+
+                    fn is_full(&self) -> bool {
+                        self.inner.len() >= self.cap as usize
+                    }
+
+                    fn extends(&mut self, data: &[f32]) {
+                        self.inner.extend(data);
+                    }
+                }
+
+                let db_ = Arc::clone(&db);
+
+                let buffer = Arc::new(Mutex::new(Buffer::new(buffer_size)));
+                let buffer_clone = Arc::clone(&buffer);
+                let buffer_clone1 = Arc::clone(&buffer);
+                let audio_item_id = SharedMutRef::<Option<String>>::new(None);
+                let audio_item_id_ref = audio_item_id.new_ref();
+                let stream = mic
+                    .build_input_stream(
+                        &config,
+                        move |data: &[f32], _| {
+                            // eprintln!("[info] data len: {}", data.len());
+                            if !buffer_clone1.lock().unwrap().is_full() {
+                                buffer_clone1.lock().unwrap().extends(data)
+                            }
+                        },
+                        audio_stream_err_fn,
+                        None,
+                    )
+                    .expect("failed to build input stream to listen for stt");
+
+                stream.pause().expect("failed to pause stream");
+
+                let pause = || {
+                    stream.pause().expect("failed to pause stream");
+
+                    let tt = super::Transcribe::new("/home/gnarus/d/caldi/models/ggml-base.en.bin");
+                    let prompt = r#"[system]
+                                    Transcribe the first 24 words in the song that the user is singing.
+                                    [user]"#;
+                    let transcript = tt.transcribe(&buffer_clone.lock().unwrap().inner, prompt);
+
+                    db_.lock()
+                        .unwrap()
+                        .update_audio_items(crate::audio::database::UpdateParams {
+                            id: audio_item_id_ref.deref().lock().unwrap().as_ref().unwrap(),
+                            filepath: None,
+                            is_playing: None,
+                            excerpt: Some(transcript),
+                        })
+                        .expect("failed to update audio items");
+                };
+
+                let mut is_done_transcribing = false;
+                loop {
+                    let command = arg.rx.try_recv();
+
+                    match command {
+                        Ok(StreamControlCommand::Play(id)) => {
+                            eprintln!("[info] stt is listening...");
+                            *audio_item_id.deref().lock().unwrap() = Some(id);
+                            stream.play().expect("failed to play stream");
+                            is_done_transcribing = false;
+                        }
+                        Ok(StreamControlCommand::Pause(_)) => {
+                            eprintln!("[info] stt is done listening");
+                            pause();
+                            is_done_transcribing = true;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            if buffer.lock().unwrap().is_full() && !is_done_transcribing {
+                                eprintln!("[info] stt is done listening");
+                                pause();
+                                is_done_transcribing = true;
+                            }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    }
+                }
+            });
+
+            return job;
+        }
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AudioItem {
     pub id: String,
-    pub excerpt: String,
+    pub excerpt: Option<String>,
     pub filepath: PathBuf,
     #[serde(default)]
     pub is_playing: bool,
 }
 
 impl AudioItem {
-    pub fn new(buffer: &[f32]) -> Self {
-        let mono = stt::stereo_to_mono(buffer);
-
-        let tt = stt::Transcribe::new("/home/gnarus/d/caldi/models/ggml-base.en.bin");
-
-        let transcript = tt.transcribe(
-            &mono,
-            "[system]\nTranscribe the first 24 words in the song that the user is singing.\n[user]",
-        );
-
-        let id = cuid2::cuid();
-
+    pub fn new(id: String) -> Self {
         Self {
             filepath: app_dir().join(&id).with_extension("wav"),
             id,
-            excerpt: transcript,
+            excerpt: None,
             is_playing: false,
         }
     }
