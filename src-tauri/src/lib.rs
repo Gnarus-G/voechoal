@@ -50,6 +50,11 @@ fn player_pause(state: tauri::State<'_, AudioCtrls>, id: String) {
         .trigger(audio::StreamControlCommand::Pause(Some(id)));
 }
 
+#[tauri::command]
+fn delete_item(state: tauri::State<'_, AudioCtrls>, id: String) {
+    state.db.lock().unwrap().remove_item(id)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -60,6 +65,7 @@ pub fn run() {
             poll_recordings,
             player_start,
             player_pause,
+            delete_item
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

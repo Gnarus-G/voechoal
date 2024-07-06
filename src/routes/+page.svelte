@@ -79,6 +79,7 @@
     padding: theme("spacing.5");
     border-radius: theme("borderRadius.full");
     background: theme("colors.fuchsia.900");
+    transition: transform 125ms ease-in-out;
   }
 
   button.toggle > span {
@@ -91,5 +92,6 @@
 
   button.toggle:hover {
     background: theme("colors.fuchsia.800");
+    transform: scale(1.2);
   }
 </style>

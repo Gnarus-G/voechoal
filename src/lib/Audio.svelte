@@ -13,9 +13,27 @@
       await invoke("player_start", { id: item.id });
     }
   }
+
+  async function remove() {
+    await invoke("delete_item", { id: item.id });
+  }
 </script>
 
-<article class="flex justify-between items-center bg-slate-800 p-3 rounded-md">
+<article
+  class="relative flex justify-between items-center bg-slate-800 p-3 rounded-md hover:bg-slate-700 transition-colors"
+>
+  <button
+    class="absolute -top-2 -left-2 bg-red-400 opacity-75 hover:opacity-100 hover:bg-red-500 transition-all active:scale-95 p-1 rounded-full text-white"
+    on:click={remove}
+  >
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      height="20px"
+      viewBox="0 -960 960 960"
+      width="20px"
+      fill="currentColor"><path d="M200-440v-80h560v80H200Z" /></svg
+    >
+  </button>
   <div>
     {#if item.excerpt}
       <h3 class="text-lg line-clamp-2">{item.excerpt}</h3>

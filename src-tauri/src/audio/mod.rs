@@ -317,6 +317,13 @@ mod database {
             self.items.clone()
         }
 
+        pub fn remove_item(&mut self, id: String) {
+            self.items
+                .iter()
+                .position(|i| i.id == id)
+                .map(|i| self.items.remove(i));
+        }
+
         pub fn write_to_wav(&mut self, item: &AudioItem, buffer: &[f32], spec: hound::WavSpec) {
             eprintln!("[info] writing wav with specs: {:?}", spec);
             let wav_filepath = self.wav_dir.join(&item.id).with_extension("wav");
