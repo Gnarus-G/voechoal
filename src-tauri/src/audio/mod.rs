@@ -272,7 +272,7 @@ pub mod ecouter {
 
 mod database {
     use std::{
-        collections::HashMap,
+        collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
     };
@@ -286,13 +286,13 @@ mod database {
 
     #[derive(serde::Deserialize, serde::Serialize)]
     pub struct Data {
-        items: HashMap<String, AudioItem>,
+        items: BTreeMap<String, AudioItem>,
     }
 
     pub struct FSDatabase {
         wav_dir: PathBuf,
         datafile: PathBuf,
-        items: HashMap<String, AudioItem>,
+        items: BTreeMap<String, AudioItem>,
     }
 
     pub struct UpdateParams<'i> {
@@ -353,7 +353,7 @@ mod database {
                 .context("failed to read from audio items data file")
             else {
                 return Ok(Data {
-                    items: HashMap::new(),
+                    items: BTreeMap::new(),
                 });
             };
 
