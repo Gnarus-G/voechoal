@@ -3,6 +3,7 @@
   import type { AudioItem } from "./types";
 
   export let item: AudioItem;
+  export let inert: boolean = false;
 
   $: is_playing = item.is_playing;
 
@@ -44,7 +45,9 @@
     <p class="text-slate-400 text-xs">{item.id}</p>
   </div>
   <button
-    class="bg-blue-700 hover:bg-blue-800 rounded-full p-2"
+    id="record_button"
+    class="rounded-full p-2"
+    disabled={inert}
     on:click={play}
   >
     {#if is_playing}
@@ -72,3 +75,18 @@
     {/if}
   </button>
 </article>
+
+<style>
+  button#record_button {
+    background-color: theme("colors.blue.700");
+  }
+
+  button#record_button:hover {
+    background-color: theme("colors.blue.800");
+  }
+
+  button#record_button:disabled {
+    background-color: theme("colors.gray.600");
+    color: theme("colors.gray.500");
+  }
+</style>

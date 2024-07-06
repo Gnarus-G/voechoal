@@ -32,7 +32,7 @@
 <div class="container mx-auto">
   <ul class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5 py-5">
     {#each state.audio_items as item}
-      <Audio {item} />
+      <Audio {item} inert={is_recording} />
     {/each}
   </ul>
 

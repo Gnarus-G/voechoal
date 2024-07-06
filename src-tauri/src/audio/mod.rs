@@ -65,23 +65,37 @@ pub mod player {
         // Thread that handles play/pause commands
         let job_handle =
             BackgroundProcedure::<Option<String>, StreamControlCommand>::setup(None, move |arg| {
-                let current_audio_item_id = arg.state;
-                let current_audio_item_id_clone = Arc::clone(&current_audio_item_id);
-
                 let (_stream, handle) = rodio::OutputStream::try_default().unwrap();
                 let sink = Arc::new(rodio::Sink::try_new(&handle).unwrap());
                 let sink_ = Arc::clone(&sink);
 
                 let (tx_id, rx_id) = channel::<String>();
 
-                let db_for_closure = Arc::clone(&db);
+                let db_clone = Arc::clone(&db);
                 let _ = std::thread::spawn(move || loop {
                     let id = rx_id.recv().unwrap();
                     let wavfilepath = app_dir().join(&id).with_extension("wav");
 
-                    let file = fs::File::open(&wavfilepath)
+                    eprintln!("[info] tyring to open the wav file for playing item: {id}");
+                    let file = match fs::File::open(&wavfilepath)
                         .context(anyhow!("failed to open file: {:?}", wavfilepath))
-                        .expect("failed to open wav file for reading");
+                    {
+                        Ok(f) => f,
+                        Err(err) => {
+                            db_clone
+                                .lock()
+                                .unwrap()
+                                .update_audio_items(UpdateParams {
+                                    id: &id,
+                                    is_playing: Some(false),
+                                    filepath: None,
+                                    label: None,
+                                })
+                                .expect("failed to mark audio item as paused");
+                            eprintln!("[err] {err:#}");
+                            continue;
+                        }
+                    };
 
                     eprintln!("[info] audio item {} is playing", id);
 
@@ -93,7 +107,7 @@ pub mod player {
 
                     eprintln!("[info] audio item {} is done playing", id);
 
-                    db_for_closure
+                    db_clone
                         .lock()
                         .unwrap()
                         .update_audio_items(UpdateParams {
@@ -103,17 +117,37 @@ pub mod player {
                             label: None,
                         })
                         .expect("failed to mark audio item as paused");
-
-                    *current_audio_item_id_clone.lock().unwrap() = None;
                 });
 
                 eprintln!("[info] player is ready");
+                let mut prev_id: Option<String> = None;
                 loop {
                     let ctrl = arg.rx.recv();
 
                     match ctrl {
                         Ok(StreamControlCommand::Play(id)) => {
                             eprintln!("[info] requested to play item: {}", id);
+
+                            if let Some(prev_id) = prev_id.as_ref() {
+                                eprintln!("[info] pausing old track");
+                                sink.pause();
+
+                                if prev_id != &id {
+                                    eprintln!("[info] stopping old track");
+                                    sink.stop();
+                                    sink.clear();
+                                }
+
+                                db.lock()
+                                    .unwrap()
+                                    .update_audio_items(UpdateParams {
+                                        id: prev_id,
+                                        is_playing: Some(false),
+                                        filepath: None,
+                                        label: None,
+                                    })
+                                    .expect("failed to mark audio item as paused");
+                            }
 
                             db.lock()
                                 .unwrap()
@@ -125,14 +159,12 @@ pub mod player {
                                 })
                                 .expect("failed to mark audio item as playing");
 
-                            if current_audio_item_id.lock().unwrap().as_ref() != Some(&id) {
-                                *current_audio_item_id.lock().unwrap() = Some(id.clone());
-                                sink.stop();
-
-                                tx_id.send(id).expect("failed to send audio item id");
-                            }
+                            tx_id
+                                .send(id.clone())
+                                .expect("failed to send audio item id");
 
                             sink.play();
+                            prev_id = Some(id);
                         }
                         Ok(StreamControlCommand::Pause(id)) => {
                             eprintln!("[info] requested to pause item: {:?}", id);
