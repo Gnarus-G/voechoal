@@ -65,7 +65,8 @@ pub mod player {
         // Thread that handles play/pause commands
         let job_handle =
             BackgroundProcedure::<Option<String>, StreamControlCommand>::setup(None, move |arg| {
-                let mut current_audio_item_id: Option<String> = None;
+                let current_audio_item_id = arg.state;
+                let current_audio_item_id_clone = Arc::clone(&current_audio_item_id);
 
                 let (_stream, handle) = rodio::OutputStream::try_default().unwrap();
                 let sink = Arc::new(rodio::Sink::try_new(&handle).unwrap());
@@ -99,9 +100,11 @@ pub mod player {
                             id: &id,
                             is_playing: Some(false),
                             filepath: None,
-                            excerpt: None,
+                            label: None,
                         })
                         .expect("failed to mark audio item as paused");
+
+                    *current_audio_item_id_clone.lock().unwrap() = None;
                 });
 
                 eprintln!("[info] player is ready");
@@ -118,12 +121,12 @@ pub mod player {
                                     id: &id,
                                     is_playing: Some(true),
                                     filepath: None,
-                                    excerpt: None,
+                                    label: None,
                                 })
                                 .expect("failed to mark audio item as playing");
 
-                            if current_audio_item_id.as_ref() != Some(&id) {
-                                current_audio_item_id = Some(id.clone());
+                            if current_audio_item_id.lock().unwrap().as_ref() != Some(&id) {
+                                *current_audio_item_id.lock().unwrap() = Some(id.clone());
                                 sink.stop();
 
                                 tx_id.send(id).expect("failed to send audio item id");
@@ -143,7 +146,7 @@ pub mod player {
                                         id: &id,
                                         is_playing: Some(false),
                                         filepath: None,
-                                        excerpt: None,
+                                        label: None,
                                     })
                                     .expect("failed to mark audio item as paused");
                             }
@@ -289,7 +292,7 @@ mod database {
         pub id: &'i str,
         pub filepath: Option<&'i Path>,
         pub is_playing: Option<bool>,
-        pub excerpt: Option<String>,
+        pub label: Option<String>,
     }
 
     pub fn wav_spec_from(config: &cpal::StreamConfig) -> hound::WavSpec {
@@ -366,7 +369,7 @@ mod database {
                         .filepath
                         .map(|p| p.to_path_buf())
                         .unwrap_or(item.filepath.clone());
-                    if let Some(e) = params.excerpt {
+                    if let Some(e) = params.label {
                         item.excerpt = Some(e);
                     }
 
@@ -444,6 +447,7 @@ mod stt {
     }
 
     pub mod listener {
+        use core::f32;
         use std::{
             ops::Deref,
             sync::{Arc, Mutex},
@@ -503,7 +507,6 @@ mod stt {
                 let db_ = Arc::clone(&db);
 
                 let buffer = Arc::new(Mutex::new(Buffer::new(buffer_size)));
-                let buffer_clone = Arc::clone(&buffer);
                 let buffer_clone1 = Arc::clone(&buffer);
                 let audio_item_id = SharedMutRef::<Option<String>>::new(None);
                 let audio_item_id_ref = audio_item_id.new_ref();
@@ -511,7 +514,7 @@ mod stt {
                     .build_input_stream(
                         &config,
                         move |data: &[f32], _| {
-                            // eprintln!("[info] data len: {}", data.len());
+                            eprintln!("[info] data len: {}", data.len());
                             if !buffer_clone1.lock().unwrap().is_full() {
                                 buffer_clone1.lock().unwrap().extends(data)
                             }
@@ -523,25 +526,30 @@ mod stt {
 
                 stream.pause().expect("failed to pause stream");
 
-                let pause = || {
-                    stream.pause().expect("failed to pause stream");
-
+                let job = BackgroundProcedure::<_, Vec<f32>>::setup((), move |arg| {
                     let tt = super::Transcribe::new("/home/gnarus/d/caldi/models/ggml-base.en.bin");
                     let prompt = r#"[system]
                                     Transcribe the first 24 words in the song that the user is singing.
                                     [user]"#;
-                    let transcript = tt.transcribe(&buffer_clone.lock().unwrap().inner, prompt);
 
-                    db_.lock()
-                        .unwrap()
-                        .update_audio_items(crate::audio::database::UpdateParams {
-                            id: audio_item_id_ref.deref().lock().unwrap().as_ref().unwrap(),
-                            filepath: None,
-                            is_playing: None,
-                            excerpt: Some(transcript),
-                        })
-                        .expect("failed to update audio items");
-                };
+                    loop {
+                        let buffer = arg.rx.recv().expect("failed to recieve from channel");
+                        if buffer.is_empty() {
+                            continue;
+                        }
+                        let transcript = tt.transcribe(&buffer, prompt);
+
+                        db_.lock()
+                            .unwrap()
+                            .update_audio_items(crate::audio::database::UpdateParams {
+                                id: audio_item_id_ref.deref().lock().unwrap().as_ref().unwrap(),
+                                filepath: None,
+                                is_playing: None,
+                                label: Some(transcript),
+                            })
+                            .expect("failed to update audio items");
+                    }
+                });
 
                 let mut is_done_transcribing = false;
                 loop {
@@ -556,13 +564,21 @@ mod stt {
                         }
                         Ok(StreamControlCommand::Pause(_)) => {
                             eprintln!("[info] stt is done listening");
-                            pause();
+                            stream.pause().expect("failed to pause stream");
+
+                            job.trigger(buffer.lock().unwrap().inner.clone());
+                            buffer.lock().unwrap().inner.clear();
+
                             is_done_transcribing = true;
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => {
                             if buffer.lock().unwrap().is_full() && !is_done_transcribing {
                                 eprintln!("[info] stt is done listening");
-                                pause();
+                                stream.pause().expect("failed to pause stream");
+
+                                job.trigger(buffer.lock().unwrap().inner.clone());
+                                buffer.lock().unwrap().inner.clear();
+
                                 is_done_transcribing = true;
                             }
                         }

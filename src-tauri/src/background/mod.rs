@@ -9,7 +9,7 @@ pub mod procedure {
 
     pub struct BackgroundProcedure<S: Sync + Send, C: Send> {
         pub state: Arc<Mutex<S>>,
-        tx: Sender<C>,
+        pub tx: Sender<C>,
     }
 
     pub struct WorkArgs<S, C: Send> {
