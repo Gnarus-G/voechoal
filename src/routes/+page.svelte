@@ -25,7 +25,7 @@
     setInterval(async () => {
       state = await invoke("poll_recordings");
       /* console.log("items", state.audio_items); */
-    }, 1000);
+    }, 250);
   });
 </script>
 
@@ -43,7 +43,9 @@
       data-recording={is_recording}
     >
       <span
-        class="absolute top-0 left-0 inline-flex h-full w-full rounded-full bg-fuchsia-600"
+        class="{is_recording
+          ? 'animate-ping'
+          : ''} absolute top-0 left-0 inline-flex h-full w-full rounded-full bg-fuchsia-600"
       ></span>
       {#if is_recording}
         <svg
@@ -85,7 +87,6 @@
 
   button.toggle[data-recording="true"] > span {
     opacity: theme("opacity.75");
-    animation: theme("animation.ping");
   }
 
   button.toggle:hover {
