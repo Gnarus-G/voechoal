@@ -169,7 +169,7 @@ pub mod ecouter {
     use cpal::traits::StreamTrait;
 
     use crate::{
-        audio::{self, audio_stream_err_fn, database::wav_spec_from},
+        audio::{audio_stream_err_fn, database::wav_spec_from},
         background::procedure::BackgroundProcedure,
     };
 
@@ -220,7 +220,7 @@ pub mod ecouter {
                     stream.pause().expect("failed to pause the input stream");
                     eprintln!("[info] done listening");
 
-                    let audio_item = audio::AudioItem::new(new_audio_item_id);
+                    let audio_item = db.lock().unwrap().get_or_create(&new_audio_item_id);
 
                     eprintln!("[info] write wav file for new audio item");
                     {
@@ -272,20 +272,27 @@ pub mod ecouter {
 
 mod database {
     use std::{
+        collections::HashMap,
         fs,
         path::{Path, PathBuf},
     };
 
     use anyhow::Context;
+    use serde_json::json;
 
     use crate::audio::app_dir;
 
     use super::{audio_items_data_file, AudioItem};
 
+    #[derive(serde::Deserialize, serde::Serialize)]
+    pub struct Data {
+        items: HashMap<String, AudioItem>,
+    }
+
     pub struct FSDatabase {
         wav_dir: PathBuf,
         datafile: PathBuf,
-        items: Vec<AudioItem>,
+        items: HashMap<String, AudioItem>,
     }
 
     pub struct UpdateParams<'i> {
@@ -309,19 +316,23 @@ mod database {
             Self {
                 wav_dir: app_dir(),
                 datafile: audio_items_data_file(),
-                items: Self::load_all().unwrap(),
+                items: Self::load_all().unwrap().items,
             }
         }
 
+        pub fn get_or_create(&self, id: &str) -> AudioItem {
+            self.items
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| AudioItem::new(id.to_owned()))
+        }
+
         pub fn items(&self) -> Vec<AudioItem> {
-            self.items.clone()
+            self.items.values().cloned().collect()
         }
 
         pub fn remove_item(&mut self, id: String) {
-            self.items
-                .iter()
-                .position(|i| i.id == id)
-                .map(|i| self.items.remove(i));
+            self.items.remove(&id);
         }
 
         pub fn write_to_wav(&mut self, item: &AudioItem, buffer: &[f32], spec: hound::WavSpec) {
@@ -337,21 +348,23 @@ mod database {
             }
         }
 
-        pub fn load_all() -> anyhow::Result<Vec<AudioItem>> {
+        pub fn load_all() -> anyhow::Result<Data> {
             let Ok(data) = fs::read_to_string(audio_items_data_file())
                 .context("failed to read from audio items data file")
             else {
-                return Ok(vec![]);
+                return Ok(Data {
+                    items: HashMap::new(),
+                });
             };
 
-            let items: Vec<_> = serde_json::from_str(&data)
+            let data: Data = serde_json::from_str(&data)
                 .context("failed to parse audio items data file json")?;
 
-            return Ok(items);
+            return Ok(data);
         }
 
         pub fn save_audio_item(&mut self, item: AudioItem) -> anyhow::Result<()> {
-            self.items.push(item);
+            self.items.insert(item.id.clone(), item);
 
             self.save_all()
                 .context("failed to save new audio item in data file")?;
@@ -360,32 +373,33 @@ mod database {
         }
 
         fn save_all(&self) -> anyhow::Result<()> {
+            let data = json!({
+                "items": self.items
+            });
             let json_string =
-                serde_json::to_string(&self.items()).context("failed to Serialize audio item")?;
+                serde_json::to_string(&data).context("failed to Serialize audio item")?;
 
             fs::write(&self.datafile, json_string)?;
 
             Ok(())
         }
 
-        pub fn update_audio_items(&mut self, params: UpdateParams) -> anyhow::Result<()> {
-            for item in self.items.iter_mut() {
-                if item.id == params.id {
-                    item.is_playing = params.is_playing.unwrap_or(item.is_playing);
-                    item.filepath = params
-                        .filepath
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or(item.filepath.clone());
-                    if let Some(e) = params.label {
-                        item.excerpt = Some(e);
-                    }
-
-                    self.save_all()?;
-                    break;
+        pub fn update_audio_items(&mut self, params: UpdateParams) -> anyhow::Result<bool> {
+            if let Some(item) = self.items.get_mut(params.id) {
+                item.is_playing = params.is_playing.unwrap_or(item.is_playing);
+                item.filepath = params
+                    .filepath
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or(item.filepath.clone());
+                if let Some(e) = params.label {
+                    item.label = Some(e);
                 }
-            }
 
-            Ok(())
+                self.save_all()?;
+                return Ok(true);
+            };
+
+            Ok(false)
         }
     }
 }
@@ -464,7 +478,7 @@ mod stt {
         use rodio::DeviceTrait;
 
         use crate::{
-            audio::{audio_stream_err_fn, database::FSDatabase, StreamControlCommand},
+            audio::{self, audio_stream_err_fn, database::FSDatabase, StreamControlCommand},
             background::procedure::BackgroundProcedure,
             sharedref::SharedMutRef,
         };
@@ -542,19 +556,40 @@ mod stt {
                     loop {
                         let buffer = arg.rx.recv().expect("failed to recieve from channel");
                         if buffer.is_empty() {
+                            eprintln!("[debug] ignoring empty buffer");
                             continue;
                         }
+                        eprintln!("[info] started transcribing");
                         let transcript = tt.transcribe(&buffer, prompt);
 
-                        db_.lock()
+                        eprintln!("[info] stopped transcribing");
+                        let id = audio_item_id_ref
+                            .deref()
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .expect("audio item should be set if we just transcribed");
+
+                        eprintln!("[info] upserting an audio item");
+                        let update_succeeded = db_
+                            .lock()
                             .unwrap()
                             .update_audio_items(crate::audio::database::UpdateParams {
-                                id: audio_item_id_ref.deref().lock().unwrap().as_ref().unwrap(),
+                                id: &id,
                                 filepath: None,
                                 is_playing: None,
-                                label: Some(transcript),
+                                label: Some(transcript.clone()),
                             })
-                            .expect("failed to update audio items");
+                            .expect("failed to update an audio item");
+
+                        if !update_succeeded {
+                            db_.lock()
+                                .unwrap()
+                                .save_audio_item(audio::AudioItem::new_with_label(id, transcript))
+                                .expect("failed to upsert an audio item");
+                        };
+
+                        eprintln!("[info] upserted an audio item");
                     }
                 });
 
@@ -602,7 +637,7 @@ mod stt {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AudioItem {
     pub id: String,
-    pub excerpt: Option<String>,
+    pub label: Option<String>,
     pub filepath: PathBuf,
     #[serde(default)]
     pub is_playing: bool,
@@ -613,9 +648,15 @@ impl AudioItem {
         Self {
             filepath: app_dir().join(&id).with_extension("wav"),
             id,
-            excerpt: None,
+            label: None,
             is_playing: false,
         }
+    }
+
+    pub fn new_with_label(id: String, label: String) -> Self {
+        let mut s = Self::new(id);
+        s.label = Some(label);
+        s
     }
 }
 
@@ -634,7 +675,7 @@ pub mod polling {
                 super::stt::IS_TRANSCRIBING.load(std::sync::atomic::Ordering::Relaxed);
 
             Ok(Self {
-                audio_items: db.items().to_vec(),
+                audio_items: db.items(),
                 is_transcribing,
             })
         }

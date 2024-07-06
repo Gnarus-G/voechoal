@@ -35,8 +35,8 @@
     >
   </button>
   <div>
-    {#if item.excerpt}
-      <h3 class="text-lg line-clamp-2">{item.excerpt}</h3>
+    {#if item.label}
+      <h3 class="text-lg line-clamp-2">{item.label}</h3>
     {:else}
       <h3 class="text-lg">...</h3>
     {/if}
